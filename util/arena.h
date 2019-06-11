@@ -52,6 +52,8 @@ class Arena {
   std::atomic<size_t> memory_usage_;
 };
 
+// alloc_ptr_和alloc_bytes_remaining_指示当前内存块的状态, 如果当前内存块的剩余空间足够, 则直接在其上
+// 完成分配; 否则调用AllocateFallback分配新的内存块, 详见AllocateFallback的注释.
 inline char* Arena::Allocate(size_t bytes) {
   // The semantics of what to return are a bit messy if we allow
   // 0-byte allocations, so we disallow them here (we don't need
