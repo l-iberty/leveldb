@@ -64,7 +64,7 @@ class MemTable {
 
  private:
   friend class MemTableIterator;
-  friend class MemTableBackwardIterator;
+  friend class MemTableBackwardIterator; // unimplemented
 
   struct KeyComparator {
     const InternalKeyComparator comparator;

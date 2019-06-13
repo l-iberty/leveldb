@@ -43,7 +43,9 @@ static const char* EncodeKey(std::string* scratch, const Slice& target) {
   return scratch->data();
 }
 
-class MemTableIterator : public Iterator {
+// MemTableIterator实现接口类Iterator的思路是: 内部定义一个SkipList::Iterator对象, 通过SkipList::Iterator
+// 与接口类Iterator的同名函数对后者定义的接口进行实现.
+class MemTableIterator : public Iterator { // 这里的Iterator是leveldb/iterator.h中定义的抽象接口类
  public:
   explicit MemTableIterator(MemTable::Table* table) : iter_(table) {}
 
@@ -67,12 +69,13 @@ class MemTableIterator : public Iterator {
   Status status() const override { return Status::OK(); }
 
  private:
-  MemTable::Table::Iterator iter_;
+  MemTable::Table::Iterator iter_; // 本质是SkipList::Iterator
   std::string tmp_;  // For passing to EncodeKey
 };
 
 Iterator* MemTable::NewIterator() { return new MemTableIterator(&table_); }
 
+// 将各个信息编码后插入SkipList. 未详细分析具体的编码过程.
 void MemTable::Add(SequenceNumber s, ValueType type, const Slice& key,
                    const Slice& value) {
   // Format of an entry is concatenation of:
@@ -100,7 +103,7 @@ void MemTable::Add(SequenceNumber s, ValueType type, const Slice& key,
 
 bool MemTable::Get(const LookupKey& key, std::string* value, Status* s) {
   Slice memkey = key.memtable_key();
-  Table::Iterator iter(&table_);
+  Table::Iterator iter(&table_); // 创建一个SkipList::Iterator. Table是SkipList的类型重定义.
   iter.Seek(memkey.data());
   if (iter.Valid()) {
     // entry format is:
@@ -115,6 +118,7 @@ bool MemTable::Get(const LookupKey& key, std::string* value, Status* s) {
     const char* entry = iter.key();
     uint32_t key_length;
     const char* key_ptr = GetVarint32Ptr(entry, entry + 5, &key_length);
+    // 比较节点中的user_key和LookupKey中的userkey是否相等, 若相等则说明找到了节点.
     if (comparator_.comparator.user_comparator()->Compare(
             Slice(key_ptr, key_length - 8), key.user_key()) == 0) {
       // Correct user key
@@ -125,7 +129,7 @@ bool MemTable::Get(const LookupKey& key, std::string* value, Status* s) {
           value->assign(v.data(), v.size());
           return true;
         }
-        case kTypeDeletion:
+        case kTypeDeletion: // 该节点被标记删除
           *s = Status::NotFound(Slice());
           return true;
       }
