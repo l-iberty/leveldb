@@ -73,9 +73,9 @@ class CondVar {
   CondVar& operator=(const CondVar&) = delete;
 
   void Wait() {
-    std::unique_lock<std::mutex> lock(mu_->mu_, std::adopt_lock);
-    cv_.wait(lock);
-    lock.release();
+    std::unique_lock<std::mutex> lock(mu_->mu_, std::adopt_lock); // assume the calling thread already has ownership of the mutex
+    cv_.wait(lock); // blocks the current thread until the condition variable is woken up.
+    lock.release(); // disassociates the associated mutex, which is mu_->mu_, without unlocking it.
   }
   void Signal() { cv_.notify_one(); }
   void SignalAll() { cv_.notify_all(); }
