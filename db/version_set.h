@@ -160,6 +160,9 @@ class Version {
   // Level that should be compacted next and its compaction score.
   // Score < 1 means compaction is not strictly needed.  These fields
   // are initialized by Finalize().
+  // compaction_score_: L0的sstable文件总数或非L0的文件总字节数与阈值之比,
+  // 如果大于等于1就说明超过阈值. compaction_score_保存该比值的最大值,
+  // compaction_level_保存compaction_score_对应的level. 参见Finalize().
   double compaction_score_;
   int compaction_level_;
 };

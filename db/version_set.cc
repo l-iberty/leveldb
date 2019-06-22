@@ -323,6 +323,11 @@ void Version::ForEachOverlapping(Slice user_key, Slice internal_key, void* arg,
   }
 }
 
+// Version::Get 在sstable文件中查找KV数据.
+// 主要流程:
+// 逐层查找sstable文件, 根据sstable文件key的范围先确定被查找的key可能落在哪些sstable文件,
+// 将它们对应的FileMetaData记录在files[], 然后对这些sstable文件做Seek()操作, 即可确定被查
+// 找的key是否存在.
 Status Version::Get(const ReadOptions& options, const LookupKey& k,
                     std::string* value, GetStats* stats) {
   Slice ikey = k.internal_key();
@@ -347,6 +352,9 @@ Status Version::Get(const ReadOptions& options, const LookupKey& k,
     // Get the list of files to search in this level
     FileMetaData* const* files = &files_[level][0];
     if (level == 0) {
+      // Level0的查找只能顺序遍历, 因为Level0的sstable文件之间可能存在重叠的key,
+      // 所以可能在多个sstable文件中命中uer_key.
+
       // Level-0 files may overlap each other.  Find all files that
       // overlap user_key and process them in order from newest to oldest.
       tmp.reserve(num_files);
@@ -363,17 +371,18 @@ Status Version::Get(const ReadOptions& options, const LookupKey& k,
       files = &tmp[0];
       num_files = tmp.size();
     } else {
+      // 非Level0的sstable文件直接不存在重叠的key, 可以使用二分查找, 且最多只会命中一个sstable文件.
       // Binary search to find earliest index whose largest key >= ikey.
       uint32_t index = FindFile(vset_->icmp_, files_[level], ikey);
       if (index >= num_files) {
         files = nullptr;
-        num_files = 0;
+        num_files = 0; // not found
       } else {
         tmp2 = files[index];
         if (ucmp->Compare(user_key, tmp2->smallest.user_key()) < 0) {
           // All of "tmp2" is past any data for user_key
           files = nullptr;
-          num_files = 0;
+          num_files = 0; // not found
         } else {
           files = &tmp2;
           num_files = 1;
@@ -381,9 +390,15 @@ Status Version::Get(const ReadOptions& options, const LookupKey& k,
       }
     }
 
+    // files[num_files]记录了可能包含指定key的sstable文件的FileMetaData, 对sstable文件做Seek
+    // 操作即可确定key是否存在.
     for (uint32_t i = 0; i < num_files; ++i) {
       if (last_file_read != nullptr && stats->seek_file == nullptr) {
         // We have had more than one seek for this read.  Charge the 1st file.
+        // 如果能进入if则说明: 对上一个sstable文件(last_file_read)的Seek未命中, 并且last_file_read
+        // 是第一个Seek未命中的sstable文件. 在对files[]中的sstable文件进行Seek的迭代过程中可能有多个
+        // sstable文件Seek未命中, 但只记录第一个(charge the 1st file), 该文件将触发seek compaction,
+        // 对seek compaction的解释详见VersionSet::PickCompaction的注释.
         stats->seek_file = last_file_read;
         stats->seek_file_level = last_file_read_level;
       }
@@ -423,6 +438,9 @@ Status Version::Get(const ReadOptions& options, const LookupKey& k,
 bool Version::UpdateStats(const GetStats& stats) {
   FileMetaData* f = stats.seek_file;
   if (f != nullptr) {
+    // FileMetaData::allowed_seeks是一个sstable文件在触发seek compaction
+    // 之前允许的最大Seek操作次数. 对于stats.seek_file指向的sstable文件, 如果
+    // allowed_seeks减至0, 就说明该文件的无效Seek次数达到阈值.
     f->allowed_seeks--;
     if (f->allowed_seeks <= 0 && file_to_compact_ == nullptr) {
       file_to_compact_ = f;
@@ -488,6 +506,45 @@ bool Version::OverlapInLevel(int level, const Slice* smallest_user_key,
                                smallest_user_key, largest_user_key);
 }
 
+// PickLevelForMemTableOutput用于判断新建的sstable文件应该放到哪一层, 流程如下:
+//
+//                                                        YES
+//               new sstable的key与Level0的文件是否有重叠 ----->-------
+//                              |                                    |
+//                              | NO                                 |
+//                              |                         YES        |
+//               new sstable的key与Level1的文件是否有重叠 ---------> Level0
+//                              |                                    |
+//                              | NO                                 |
+//                              |                         YES        |
+//               new sstable的key与Level2的重叠文件的size ----->-------
+//                         是否超过阈值
+//                              |
+//                              | NO
+//                              |                         YES
+//               new sstable的key与Level2的文件是否有重叠 ----->-------
+//                              |                                    |
+//                              | NO                                 |
+//                              |                         YES        |
+//               new sstable的key与Level3的重叠文件的size --------> Level1
+//                         是否超过阈值
+//                              |
+//                              | NO
+//                              |                         YES
+//               new sstable的key与Level3的文件是否有重叠 ----->-------
+//                              |                                    |
+//                              | NO                                 |
+//                              |                         YES        |
+//               new sstable的key与Level4的重叠文件的size --------> Level2
+//                         是否超过阈值                    NO
+//
+// 上述过程保证: 只有Level0的sstable文件的key存在重叠, 这直接影响了Version::Get逐层查找的策略.
+//
+// Level0的sstable文件由immutable memtable直接dump得到, 而immutable memtable的前身是memtable,
+// 因此可以将Level0的sstable文件看做是memtable的直接映射, 所以其中的key可能存在重叠. 例如,
+// 用户首先插入了很多KV数据, 其中key的范围是[1,100], 此时触发了compaction, 生成了L0的sstable1,
+// 随后用户又插入了key的范围是[50,200]的KV数据, 又触发了compaction, 生成了L0的sstable2, 那么
+// L0的sstable1和sstable2的key就发生了重叠.
 int Version::PickLevelForMemTableOutput(const Slice& smallest_user_key,
                                         const Slice& largest_user_key) {
   int level = 0;
@@ -1264,12 +1321,23 @@ Iterator* VersionSet::MakeInputIterator(Compaction* c) {
   return result;
 }
 
+// PickCompaction 选择需要进行compaction的sstable文件
+//
+// 首先判断当前level中sstable的哪个属性触发了compaction.
+// 1. size_compaction L0:文件总数达到阈值; 非L0:文件总字节数达到阈值, 参见Finalize().
+// 2. seek_compaction current_->file_to_compact_所指向的sstable的无效Seek次数达到阈值
+// seek sompaction:
+// 除Level0外(Level0的sstable文件的key可能存在重叠), 任何一个Level中sstable之间的key
+// 都是有序的, 但Level(n)和Level(n+1)的两个sstable之间可能存在key重叠. 查找sstable时逐层
+// 下降, 先根据key的范围确定可能的sstable, 然后逐一进行Seek操作(Version::Get). 正是由于
+// key的这种重叠, 有时Level(n)的某个sstable的Seek操作未命中, 不得不去Level(n+1)查找, 这就
+// 会影响sstable的查找效率, 因此需要对sstable进行major compaction.
 Compaction* VersionSet::PickCompaction() {
   Compaction* c;
   int level;
 
   // We prefer compactions triggered by too much data in a level over
-  // the compactions triggered by seeks.
+  // the compactions triggered by seeks. (size_compaction优先)
   const bool size_compaction = (current_->compaction_score_ >= 1);
   const bool seek_compaction = (current_->file_to_compact_ != nullptr);
   if (size_compaction) {
@@ -1278,6 +1346,7 @@ Compaction* VersionSet::PickCompaction() {
     assert(level + 1 < config::kNumLevels);
     c = new Compaction(options_, level);
 
+    // 对于size_compaction, 选择上一次compaction之后的下一个sstable文件
     // Pick the first file that comes after compact_pointer_[level]
     for (size_t i = 0; i < current_->files_[level].size(); i++) {
       FileMetaData* f = current_->files_[level][i];
@@ -1292,6 +1361,7 @@ Compaction* VersionSet::PickCompaction() {
       c->inputs_[0].push_back(current_->files_[level][0]);
     }
   } else if (seek_compaction) {
+    // 对于seek_compaction, 直接选择file_to_compact_指向的sstable文件
     level = current_->file_to_compact_level_;
     c = new Compaction(options_, level);
     c->inputs_[0].push_back(current_->file_to_compact_);
@@ -1458,9 +1528,11 @@ void VersionSet::SetupOtherInputs(Compaction* c) {
   c->edit_.SetCompactPointer(level, largest);
 }
 
+// 得到level层中指定范围内[begin,end]需要compaction的sstable文件.
 Compaction* VersionSet::CompactRange(int level, const InternalKey* begin,
                                      const InternalKey* end) {
   std::vector<FileMetaData*> inputs;
+  // 将当前层中与[begin, end]有重叠的sstable文件放入inputs.
   current_->GetOverlappingInputs(level, begin, end, &inputs);
   if (inputs.empty()) {
     return nullptr;
