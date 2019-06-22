@@ -285,8 +285,6 @@ bool SkipList<Key, Comparator>::KeyIsAfterNode(const Key& key, Node* n) const {
 //   指向NULL, next_[0]指向[34], next_[1]指向[45], 这个[45]和[34]的next_[0]指向的[45]是同一个. 对于level_0
 //   除[7]、[15]、[31]和[45]外的节点, next_的长度均为1, next_[0]指向各自的后继.
 //
-// leveldb实现SkipList的精妙之处在于: 没有重复创建key相同的节点, 节点的层次逻辑通过指针数组next_实现, 大大减小了内存开销.
-//
 // 假设以key=[30]为参数调用FindGreaterOrEqual, 过程如下:
 // 初始化x=head_, level=4-1=3
 // loop 1: next=x->Next(3)=[7], key=[30]在next=[7]之后, 令x=next=[7]
