@@ -147,6 +147,7 @@ class HandleTable {
 };
 
 // A single shard of sharded cache.
+// SharedLRUCache对象在被创建时被分为kNumShards份, 每一份都是LRUCache对象.
 class LRUCache {
  public:
   LRUCache();
@@ -283,15 +284,19 @@ Cache::Handle* LRUCache::Insert(const Slice& key, uint32_t hash, void* value,
   if (capacity_ > 0) {
     e->refs++;  // for the cache's reference.
     e->in_cache = true;
-    LRU_Append(&in_use_, e);
+    LRU_Append(&in_use_, e); // 将e插入到in_use_的前面
     usage_ += charge;
     FinishErase(table_.Insert(e));
   } else {  // don't cache. (capacity_==0 is supported and turns off caching.)
     // next is read by key() in an assert, so it must be initialized
     e->next = nullptr;
   }
+
+  // 容量溢出时需要移除旧的LRUHandle对象:
+  // 1. 选择lru_.next指向的LRUHandle对象, 先从哈希表中移除, 再从lru_链表中移除;
+  // 2. 引用计数减1后必为0(因为lru_链表中的LRUHandle对象的引用计数均为1), 该LRUHandle对象就会被free掉.
   while (usage_ > capacity_ && lru_.next != &lru_) {
-    LRUHandle* old = lru_.next;
+    LRUHandle* old = lru_.next; // lru_.next is oldest entry.
     assert(old->refs == 1);
     bool erased = FinishErase(table_.Remove(old->key(), old->hash));
     if (!erased) {  // to avoid unused variable when compiled NDEBUG
@@ -349,6 +354,7 @@ class ShardedLRUCache : public Cache {
 
  public:
   explicit ShardedLRUCache(size_t capacity) : last_id_(0) {
+    // 将capacity分成kNumShards份, 每一份的容量是per_shard.
     const size_t per_shard = (capacity + (kNumShards - 1)) / kNumShards;
     for (int s = 0; s < kNumShards; s++) {
       shard_[s].SetCapacity(per_shard);
