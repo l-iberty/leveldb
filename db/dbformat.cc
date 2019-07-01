@@ -111,8 +111,8 @@ void InternalFilterPolicy::CreateFilter(const Slice* keys, int n,
   user_policy_->CreateFilter(keys, n, dst);
 }
 
-bool InternalFilterPolicy::KeyMayMatch(const Slice& key, const Slice& f) const {
-  return user_policy_->KeyMayMatch(ExtractUserKey(key), f);
+bool InternalFilterPolicy::KeyMayMatch(const Slice& key, const Slice& filter) const {
+  return user_policy_->KeyMayMatch(ExtractUserKey(key), filter);
 }
 
 LookupKey::LookupKey(const Slice& user_key, SequenceNumber s) {
