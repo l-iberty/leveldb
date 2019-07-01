@@ -46,8 +46,9 @@ class FilterBlockBuilder {
   std::string keys_;             // Flattened key contents
   std::vector<size_t> start_;    // Starting index in keys_ of each key
   std::string result_;           // Filter data computed so far
+                                 // 保存若干个BloomFilter, 每个的结构为[BloomFilter的位图][模拟的哈希函数个数], 参见util/bloom.cc
   std::vector<Slice> tmp_keys_;  // policy_->CreateFilter() argument
-  std::vector<uint32_t> filter_offsets_;
+  std::vector<uint32_t> filter_offsets_; // result_保存了若干个BloomFilter结构, filter_offsets_保存它们的偏移地址
 };
 
 class FilterBlockReader {

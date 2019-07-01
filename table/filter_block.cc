@@ -32,9 +32,26 @@ void FilterBlockBuilder::AddKey(const Slice& key) {
   keys_.append(k.data(), k.size());
 }
 
+// 考虑这样一种调用顺序:
+// 若干次AddKey() -> GenerateFilter() -> 若干次AddKey() -> GenerateFilter() -> ... -> Finish()
+//
+// 那么result_就会保存了若干个BloomFilter结构, filter_offsets_[]保存了这些结构的偏移地址, 最后调用
+// Finish()时, 先将filter_offsets_[]的数据append到result_, 然后把filter_offsets_[]在result_中的
+// 偏移地址append到result_, 最后附上解码参数kFilterBaseLg, 最终result_的数据结构如下:
+//
+// [filter_1] `.
+// [filter_2]  | 若干BloomFilter结构
+// ...         |
+// [filter_n] /
+// [filter_offsets_0] `.
+// [filter_offsets_1]  | 每个BloomFilter结构的偏移地址
+// ...                 |
+// [filter_offsets_n] /
+// [array_offset]  filter_offsets_[]在result_中的偏移地址
+// [kFilterBaseLg] 编码参数
 Slice FilterBlockBuilder::Finish() {
   if (!start_.empty()) {
-    GenerateFilter();
+    GenerateFilter(); // 如果调用Finish()之前还有key没有被添加到BloomFilter结构中, 就再调一下GenerateFilter()
   }
 
   // Append array of per-filter offsets
@@ -56,6 +73,7 @@ void FilterBlockBuilder::GenerateFilter() {
     return;
   }
 
+  // 从字符串keys_中把每个key解析出来, 保存在tmp_keys_[], 用作policy_->CreateFilter()的参数.
   // Make list of keys from flattened key structure
   start_.push_back(keys_.size());  // Simplify length computation
   tmp_keys_.resize(num_keys);
@@ -78,13 +96,15 @@ FilterBlockReader::FilterBlockReader(const FilterPolicy* policy,
                                      const Slice& contents)
     : policy_(policy), data_(nullptr), offset_(nullptr), num_(0), base_lg_(0) {
   size_t n = contents.size();
+  // 参见FilterBlockBuilder::Finish(), contents至少包含2个数据: [array_offset](uint32), [kFilterBaseLg](uint8)
   if (n < 5) return;  // 1 byte for base_lg_ and 4 for start of offset array
+
   base_lg_ = contents[n - 1];
-  uint32_t last_word = DecodeFixed32(contents.data() + n - 5);
-  if (last_word > n - 5) return;
+  uint32_t last_word = DecodeFixed32(contents.data() + n - 5); // last_word即[array_offset]
+  if (last_word > n - 5) return; // 除了[array_offset]和[kFilterBaseLg]外没有其他有效数据
   data_ = contents.data();
-  offset_ = data_ + last_word;
-  num_ = (n - 5 - last_word) / 4;
+  offset_ = data_ + last_word; // offset_[] <=> FilterBlockBuilder::filter_offsets_[]
+  num_ = (n - 5 - last_word) / 4; // num of entries in offset_[]
 }
 
 bool FilterBlockReader::KeyMayMatch(uint64_t block_offset, const Slice& key) {
@@ -92,8 +112,14 @@ bool FilterBlockReader::KeyMayMatch(uint64_t block_offset, const Slice& key) {
   if (index < num_) {
     uint32_t start = DecodeFixed32(offset_ + index * 4);
     uint32_t limit = DecodeFixed32(offset_ + index * 4 + 4);
+    // 以下分析需要对照FilterBlockBuilder::Finish()得到的数据结构.
+    // 把offset_看成uint32数组, 则: start = offset_[index], limit = offset_[index+1]
+    // offset_ - data_ = 所有BloomFilter结构的总长度
+    // 如果index对应与最后一个BloomFilter结构, 即offset_[index]是最后一项, 那么offset_[index+1]就等于[array_offset],
+    // 即 limit = [array_offset] = offset_[0]在data_中的偏移地址 = 所有BloomFilter结构的总长度
+    // 所以, limit不能超过offset_ - data_
     if (start <= limit && limit <= static_cast<size_t>(offset_ - data_)) {
-      Slice filter = Slice(data_ + start, limit - start);
+      Slice filter = Slice(data_ + start, limit - start); // limit - start = index指向的BloomFilter结构的长度
       return policy_->KeyMayMatch(key, filter);
     } else if (start == limit) {
       // Empty filters do not match any keys

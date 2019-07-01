@@ -25,6 +25,7 @@ class BloomFilterPolicy : public FilterPolicy {
 
   const char* Name() const override { return "leveldb.BuiltinBloomFilter2"; }
 
+  // 对keys[]中的n个key计算一个BloomFilter, 将这个BloomFilter的位图和模拟的哈希函数个数k_附加到dst.
   void CreateFilter(const Slice* keys, int n, std::string* dst) const override {
     // Compute bloom filter size (in both bits and bytes)
     size_t bits = n * bits_per_key_;
@@ -39,16 +40,18 @@ class BloomFilterPolicy : public FilterPolicy {
     const size_t init_size = dst->size();
     dst->resize(init_size + bytes, 0);
     dst->push_back(static_cast<char>(k_));  // Remember # of probes in filter
+    // 当前dst的内容为:
+    // [长度为init_size的原始数据][长度为bits的BloomFilter位图,初始化为0][k_]
     char* array = &(*dst)[init_size];
     for (int i = 0; i < n; i++) {
       // Use double-hashing to generate a sequence of hash values.
       // See analysis in [Kirsch,Mitzenmacher 2006].
       uint32_t h = BloomHash(keys[i]);
       const uint32_t delta = (h >> 17) | (h << 15);  // Rotate right 17 bits
-      for (size_t j = 0; j < k_; j++) {
+      for (size_t j = 0; j < k_; j++) { // k_是模拟的哈希函数个数
         const uint32_t bitpos = h % bits;
-        array[bitpos / 8] |= (1 << (bitpos % 8));
-        h += delta;
+        array[bitpos / 8] |= (1 << (bitpos % 8)); // BloomFilter的位图置位操作
+        h += delta; // 计算下一个哈希值, 相当于用下一个哈希函数计算一个新的哈希值
       }
     }
   }
