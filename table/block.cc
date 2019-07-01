@@ -17,6 +17,7 @@
 
 namespace leveldb {
 
+// 获取重启点的个数, 参见block_builder.cc
 inline uint32_t Block::NumRestarts() const {
   assert(size_ >= sizeof(uint32_t));
   return DecodeFixed32(data_ + size_ - sizeof(uint32_t));
@@ -35,6 +36,7 @@ Block::Block(const BlockContents& contents)
       size_ = 0;
     } else {
       restart_offset_ = size_ - (1 + NumRestarts()) * sizeof(uint32_t);
+      // restart_offset_ = 重启点数组BlockBuilder::restarts_[]的偏移地址, 参见block_builder.cc
     }
   }
 }
@@ -82,10 +84,10 @@ class Block::Iter : public Iterator {
   uint32_t const num_restarts_;  // Number of uint32_t entries in restart array
 
   // current_ is offset in data_ of current entry.  >= restarts_ if !Valid
-  uint32_t current_;
+  uint32_t current_; // 当前遍历到哪一个前缀压缩数据?
   uint32_t restart_index_;  // Index of restart block in which current_ falls
   std::string key_;
-  Slice value_;
+  Slice value_; // key_和value_是从前缀压缩数据中解析出来的完整的key和value
   Status status_;
 
   inline int Compare(const Slice& a, const Slice& b) const {
@@ -93,10 +95,12 @@ class Block::Iter : public Iterator {
   }
 
   // Return the offset in data_ just past the end of the current entry.
+  // 返回下一个前缀压缩数据的偏移量
   inline uint32_t NextEntryOffset() const {
     return (value_.data() + value_.size()) - data_;
   }
 
+  // 返回重启点数组项BlockBuilder::restarts_[index], 参见block_builder.cc
   uint32_t GetRestartPoint(uint32_t index) {
     assert(index < num_restarts_);
     return DecodeFixed32(data_ + restarts_ + index * sizeof(uint32_t));
@@ -124,12 +128,17 @@ class Block::Iter : public Iterator {
     assert(num_restarts_ > 0);
   }
 
+  // current_是当前遍历到的前缀压缩数据的偏移地址, 止于重启点数组的偏移地址restarts_, 参见block_builder.cc.
+  // 所以, 如果 current_ >= restarts_ 就说明前缀压缩数据已经遍历结束.
   bool Valid() const override { return current_ < restarts_; }
+
   Status status() const override { return status_; }
+
   Slice key() const override {
     assert(Valid());
     return key_;
   }
+
   Slice value() const override {
     assert(Valid());
     return value_;
@@ -140,6 +149,7 @@ class Block::Iter : public Iterator {
     ParseNextKey();
   }
 
+  // 要获得前一个前缀压缩数据, 只能从头再遍历一次
   void Prev() override {
     assert(Valid());
 
@@ -222,6 +232,7 @@ class Block::Iter : public Iterator {
     value_.clear();
   }
 
+  // 解析出下一个前缀压缩数据, 将结果保存在key_和value_
   bool ParseNextKey() {
     current_ = NextEntryOffset();
     const char* p = data_ + current_;

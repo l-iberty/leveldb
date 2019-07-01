@@ -1,8 +1,8 @@
-# LevelDB的LRU Cache实现分析
+# LRU Cache分析
 ## 一、`HandleTable`
 `HandleTable`是保存`LRUHandle`的哈希表.
 ### 1. `HandleTable::FindPointer`
-![](images/哈希表HandleTable的组织方式.png)
+![](images/LRU_Cache/哈希表HandleTable的组织方式.png)
 
 **图1.1-哈希表HandleTable的组织方式**
 
@@ -20,7 +20,7 @@ LRUHandle** FindPointer(const Slice& key, uint32_t hash) {
 
 首先将`ptr`定位到`list_[]`的某一个槽位, 如果出现如下情况:
 
-![](images/FindPointer_1.png)
+![](images/LRU_Cache/FindPointer_1.png)
 
 **图1.2**
 
@@ -28,13 +28,13 @@ LRUHandle** FindPointer(const Slice& key, uint32_t hash) {
 
 如果是下面这种情况:
 
-![](images/FindPointer_2.png)
+![](images/LRU_Cache/FindPointer_2.png)
 
 **图1.3**
 
 在循环过程中遍历链表上的`LRUHandle`对象是通过`next_hash`指针进行的, 如果找到匹配的`key`（假设是第2个`LRUHandle`对象）, 那么`ptr`的情形如下:
 
-![](images/FindPointer_3.png)
+![](images/LRU_Cache/FindPointer_3.png)
 
 **图1.4**
 
@@ -42,7 +42,7 @@ LRUHandle** FindPointer(const Slice& key, uint32_t hash) {
 
 如果在链表中没有找到匹配的`key`，那么退出循环后`ptr`的情形如下:
 
-![](images/FindPointer_4.png)
+![](images/LRU_Cache/FindPointer_4.png)
 
 **图1.5**
 
@@ -72,21 +72,21 @@ LRUHandle* Insert(LRUHandle* h) {
 
 首先通过`FindPointer`找到插入位置`ptr`. 如果查找失败，即哈希表中没有`h`这个节点，那么`old`就为`nullptr`，随后修改`ptr`指向的`LRUHandle*`指针将`h`链入，对应于**图1.2**和**图1.5**两种情况. 如果查找成功，则`ptr`和`old`的情形如下图所示:
 
-![](images/Insert_1.png)
+![](images/LRU_Cache/Insert_1.png)
 
 通过修改指针将`h`链入后的情形如下:
 
-![](images/Insert_2.png)
+![](images/LRU_Cache/Insert_2.png)
 
 `old`指向的对象已被从链表中移除了，也就不再属于哈希表，所以对于重复元素的插入策略是：**用新的替换旧的**. 在`LRUCache::Insert`函数中通过调用`LRUCache::FinishErase`对`old`指向的`LRUHandle`对象做进一步处理.
 
 注意，在查找成功的情况下还可能出现如下情形:
 
-![](images/Insert_3.png)
+![](images/LRU_Cache/Insert_3.png)
 
 根据“**用新的替换旧的**”的插入策略，将`h`链入后的情形如下:
 
-![](images/Insert_4.png)
+![](images/LRU_Cache/Insert_4.png)
 
 ### 3. `HandleTable::Remove`
 
