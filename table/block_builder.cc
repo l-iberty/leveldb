@@ -76,9 +76,9 @@ size_t BlockBuilder::CurrentSizeEstimate() const {
 Slice BlockBuilder::Finish() {
   // Append restart array
   for (size_t i = 0; i < restarts_.size(); i++) {
-    PutFixed32(&buffer_, restarts_[i]); // 重启点的位置
+    PutFixed32(&buffer_, restarts_[i]);
   }
-  PutFixed32(&buffer_, restarts_.size()); // 重启点的个数
+  PutFixed32(&buffer_, restarts_.size());
   finished_ = true;
   return Slice(buffer_);
 }

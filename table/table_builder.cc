@@ -47,6 +47,14 @@ struct TableBuilder::Rep {
   bool closed;  // Either Finish() or Abandon() has been called.
   FilterBlockBuilder* filter_block;
 
+  // 直到遇到下一个DataBlock的第1个key时, 我们才为上一个DataBlock生成Index Block.
+  // 这样做的好处是, 可以选择为Index Block选择较短的key. 例如, 上一个DataBlock
+  // 的最后一个key是"the quick brown fox", 其后继DataBlock的第一个key是"the who",
+  // 那么就可以选择"the r"作为作为上一个DataBlock的Index Block的key. 那么, 自然只有
+  // 等到一个DataBlock中的KV数据全部添加完毕, 才能知道最后一个key是什么. 至于如何选择
+  // 这个"较短的key", 就需要参考BytewiseComparatorImpl::FindShortestSeparator(),
+  // 见util/comparator.cc, 我给出了详细的注释.
+
   // We do not emit the index entry for a block until we have seen the
   // first key for the next data block.  This allows us to use shorter
   // keys in the index block.  For example, consider a block boundary
@@ -99,25 +107,31 @@ void TableBuilder::Add(const Slice& key, const Slice& value) {
     assert(r->options.comparator->Compare(key, Slice(r->last_key)) > 0);
   }
 
-  if (r->pending_index_entry) {
+  if (r->pending_index_entry) { // 为上一个DataBlock生成Index Block
     assert(r->data_block.empty());
+    // 选择一个较短的key作为Index Block的key.
     r->options.comparator->FindShortestSeparator(&r->last_key, key);
     std::string handle_encoding;
+    // pending_handle保存了上一个DataBlock的大小及其在sstable文件中的偏移地址, 参见TableBuilder::Flush(),
+    // 现将其编码到字符串handle_encoding, 作为Index Block的value.
     r->pending_handle.EncodeTo(&handle_encoding);
     r->index_block.Add(r->last_key, Slice(handle_encoding));
     r->pending_index_entry = false;
   }
 
   if (r->filter_block != nullptr) {
-    r->filter_block->AddKey(key);
+    r->filter_block->AddKey(key); // 向FilterBlock添加key
   }
 
   r->last_key.assign(key.data(), key.size());
   r->num_entries++;
-  r->data_block.Add(key, value);
+  r->data_block.Add(key, value); // 向DataBlock添加KV数据
 
   const size_t estimated_block_size = r->data_block.CurrentSizeEstimate();
   if (estimated_block_size >= r->options.block_size) {
+    // data_block已达到一定的规模(缺省值为4KB; 另外需要注意, 此时尚未调用data_block.Finish(),
+    // 所以其中只包含前缀压缩的KV数据, 生成完整的DataBlock需要等到WriteBlock()), 将其持久化到
+    // sstable文件; 然后生成这些key对应的filter结构, 但先不把filter结构持久化.
     Flush();
   }
 }
@@ -128,10 +142,10 @@ void TableBuilder::Flush() {
   if (!ok()) return;
   if (r->data_block.empty()) return;
   assert(!r->pending_index_entry);
-  WriteBlock(&r->data_block, &r->pending_handle);
-  if (ok()) {
-    r->pending_index_entry = true;
-    r->status = r->file->Flush();
+  WriteBlock(&r->data_block, &r->pending_handle); // pending_handle保存当前DataBlock的大小及其在sstable文件中的偏移地址
+  if (ok()) { // 文件写入成功
+    r->pending_index_entry = true; // 当前DataBlock处理完毕, 下一个DataBlock的第1个key到来时就为其前驱DataBlock生成Index Block
+    r->status = r->file->Flush(); // 刷新文件状态
   }
   if (r->filter_block != nullptr) {
     r->filter_block->StartBlock(r->offset);
@@ -145,7 +159,7 @@ void TableBuilder::WriteBlock(BlockBuilder* block, BlockHandle* handle) {
   //    crc: uint32
   assert(ok());
   Rep* r = rep_;
-  Slice raw = block->Finish();
+  Slice raw = block->Finish(); // 生成DataBlock的序列化字符串
 
   Slice block_contents;
   CompressionType type = r->options.compression;
@@ -174,30 +188,43 @@ void TableBuilder::WriteBlock(BlockBuilder* block, BlockHandle* handle) {
   block->Reset();
 }
 
+// 最终写入sstable文件的数据包括:
+//  block_contents: uint8[n] (可以是各种类型的block, 比如DataBlock, FilterBlock)
+//  type: uint8
+//  crc: uint32
 void TableBuilder::WriteRawBlock(const Slice& block_contents,
                                  CompressionType type, BlockHandle* handle) {
   Rep* r = rep_;
-  handle->set_offset(r->offset);
+  handle->set_offset(r->offset); // rep_->offset = 本次写入位置的文件偏移 = 本次写入前的文件大小, 首次写入时为0.
   handle->set_size(block_contents.size());
   r->status = r->file->Append(block_contents);
   if (r->status.ok()) {
-    char trailer[kBlockTrailerSize];
+    char trailer[kBlockTrailerSize]; // 1-byte type + 32-bit crc
     trailer[0] = type;
     uint32_t crc = crc32c::Value(block_contents.data(), block_contents.size());
     crc = crc32c::Extend(crc, trailer, 1);  // Extend crc to cover block type
     EncodeFixed32(trailer + 1, crc32c::Mask(crc));
     r->status = r->file->Append(Slice(trailer, kBlockTrailerSize));
     if (r->status.ok()) {
-      r->offset += block_contents.size() + kBlockTrailerSize;
+      r->offset += block_contents.size() + kBlockTrailerSize; // rep_->offset += 本次写入的字节数
     }
   }
 }
 
 Status TableBuilder::status() const { return rep_->status; }
 
+// 最终写入sstable文件的逻辑结构如下(详细解释参见mydoc/SSTable逻辑结构.md)：
+// [ DataBlock_1 ][type][crc]
+// [ DataBlock_2 ][type][crc]
+// ...
+// [ DataBlock_n ][type][crc]
+// [ FilterBlock ]
+// [ Meta Index Block ]
+// [ Index Block ]
+// [ Footer ]
 Status TableBuilder::Finish() {
   Rep* r = rep_;
-  Flush();
+  Flush(); // 写入最后一个数据块: [DataBlock][type][crc]
   assert(!r->closed);
   r->closed = true;
 
@@ -207,6 +234,7 @@ Status TableBuilder::Finish() {
   if (ok() && r->filter_block != nullptr) {
     WriteRawBlock(r->filter_block->Finish(), kNoCompression,
                   &filter_block_handle);
+    // filter_block_handle保存FilterBlock的大小及其在sstable文件中的偏移地址
   }
 
   // Write metaindex block
@@ -217,24 +245,29 @@ Status TableBuilder::Finish() {
       std::string key = "filter.";
       key.append(r->options.filter_policy->Name());
       std::string handle_encoding;
+      // 将filter_block_handle保存的FilterBlock的大小及其在sstable文件中的偏移地址
+      // 编码到字符串handle_encoding, 作为Meta Index Block的value.
       filter_block_handle.EncodeTo(&handle_encoding);
       meta_index_block.Add(key, handle_encoding);
     }
 
     // TODO(postrelease): Add stats and other meta blocks
     WriteBlock(&meta_index_block, &metaindex_block_handle);
+    // metaindex_block_handle保存Meta Index Block的大小及其在sstable文件中的偏移地址
   }
 
   // Write index block
+  // Index Block中的每一条KV数据都是前面若干个DataBlock的索引
   if (ok()) {
-    if (r->pending_index_entry) {
+    if (r->pending_index_entry) { // 为最后一个DataBlock生成Index Block
       r->options.comparator->FindShortSuccessor(&r->last_key);
       std::string handle_encoding;
-      r->pending_handle.EncodeTo(&handle_encoding);
+      r->pending_handle.EncodeTo(&handle_encoding); // pending_handle的含义参见TableBuilder::Add()
       r->index_block.Add(r->last_key, Slice(handle_encoding));
       r->pending_index_entry = false;
     }
     WriteBlock(&r->index_block, &index_block_handle);
+    // index_block_handle保存Index Block的大小及其在sstable文件中的偏移
   }
 
   // Write footer

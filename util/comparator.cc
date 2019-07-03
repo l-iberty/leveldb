@@ -28,6 +28,13 @@ class BytewiseComparatorImpl : public Comparator {
     return a.compare(b);
   }
 
+  // 如果start和limit中的一个是另一个的前缀, 就不改变start;
+  // 否则: 如果start[diff_index] < 0xff && start[diff_index] + 1 < limit[diff_index],
+  // 就start[diff_index]++, 并将start在diff_index之后的内容截断, 以此来缩短start的长度,
+  // 加速内存比较.
+  // 例如: start = "hello", limit = "helw", 则diff_index = 3, diff_byte = start[3] = 'l'
+  // start[3] + 1 = 'm' < limit[3] = 'w', 于是: start[3] = 'm', 将diff_index之后的内容截断,
+  // start就变为"helm".
   void FindShortestSeparator(std::string* start,
                              const Slice& limit) const override {
     // Find length of common prefix

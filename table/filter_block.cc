@@ -18,6 +18,12 @@ static const size_t kFilterBase = 1 << kFilterBaseLg;
 FilterBlockBuilder::FilterBlockBuilder(const FilterPolicy* policy)
     : policy_(policy) {}
 
+// TableBuilder::Add()向DataBlock添加的KV数据达到一定规模(缺省值为4KB)后, 就会
+// 调用TableBuilder::Flush()将数据持久化到sstable文件, 首先写入的是DataBlock,
+// 写入成功后TableBuilder会记录一个偏移量offset, offset = 当前sstable文件大小,
+// 然后调用StartBlock(offset), 这是一个意义不明确的调用, 暂且认为其功能是:
+// 对DataBlock中的key生成一个filter结构, 将其append到result_, 并保存该filter结构
+// 在result_中的偏移.
 void FilterBlockBuilder::StartBlock(uint64_t block_offset) {
   uint64_t filter_index = (block_offset / kFilterBase);
   assert(filter_index >= filter_offsets_.size());
@@ -65,6 +71,7 @@ Slice FilterBlockBuilder::Finish() {
   return Slice(result_);
 }
 
+// 根据保存的key生成filter结构, 将其append到result_, 并保存该filter结构在result_中的偏移
 void FilterBlockBuilder::GenerateFilter() {
   const size_t num_keys = start_.size();
   if (num_keys == 0) {
