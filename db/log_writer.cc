@@ -41,6 +41,7 @@ Status Writer::AddRecord(const Slice& slice) {
   Status s;
   bool begin = true;
   do {
+    // 以block为单位添加记录. 如果当前block的剩余空间小于kHeaderSize, 就将剩余空间填充0, 切换到下一个block
     const int leftover = kBlockSize - block_offset_;
     assert(leftover >= 0);
     if (leftover < kHeaderSize) {
