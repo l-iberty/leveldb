@@ -271,6 +271,7 @@ Status TableBuilder::Finish() {
   }
 
   // Write footer
+  // Footer中的信息包括: Meta Index Block和Index Block的大小及其在sstable文件中的偏移地址; 64-bit的MagicNumber
   if (ok()) {
     Footer footer;
     footer.set_metaindex_handle(metaindex_block_handle);
