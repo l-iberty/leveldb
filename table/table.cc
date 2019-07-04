@@ -35,24 +35,29 @@ struct Table::Rep {
   Block* index_block;
 };
 
-Status Table::Open(const Options& options, RandomAccessFile* file,
+// 创建一个Table对象, 将其保存到*table. Table对象是对sstable的缓存, 但是其中的若干个
+// DataBlock并未读入到内存中, 读入的模块包括: Footer, Index Block, Meta Index Block.
+Status Table::Open(const Options& options, RandomAccessFile* file, // file是一个只读sstable文件
                    uint64_t size, Table** table) {
   *table = nullptr;
   if (size < Footer::kEncodedLength) {
     return Status::Corruption("file is too short to be an sstable");
   }
 
+  // Read the footer
   char footer_space[Footer::kEncodedLength];
   Slice footer_input;
   Status s = file->Read(size - Footer::kEncodedLength, Footer::kEncodedLength,
                         &footer_input, footer_space);
   if (!s.ok()) return s;
 
+  // 将Footer的序列化字符串反序列化为Footer对象
   Footer footer;
   s = footer.DecodeFrom(&footer_input);
   if (!s.ok()) return s;
 
   // Read the index block
+  // 根据Footer的索引信息读入Index Block, 用以索引sstable中的若干个DataBlock
   BlockContents index_block_contents;
   if (s.ok()) {
     ReadOptions opt;
@@ -81,6 +86,7 @@ Status Table::Open(const Options& options, RandomAccessFile* file,
   return s;
 }
 
+// 根据Footer读入Meta Index Block
 void Table::ReadMeta(const Footer& footer) {
   if (rep_->options.filter_policy == nullptr) {
     return;  // Do not need any metadata
@@ -92,6 +98,8 @@ void Table::ReadMeta(const Footer& footer) {
   if (rep_->options.paranoid_checks) {
     opt.verify_checksums = true;
   }
+
+  // Read metaindex block
   BlockContents contents;
   if (!ReadBlock(rep_->file, opt, footer.metaindex_handle(), &contents).ok()) {
     // Do not propagate errors since meta info is not needed for operation
@@ -99,6 +107,9 @@ void Table::ReadMeta(const Footer& footer) {
   }
   Block* meta = new Block(contents);
 
+  // Meta Index Block的key形如"filter.Name", Name是过滤器的名字;
+  // value是FilterBlock的大小及其在sstable文件中的偏移地址, 据此
+  // 可以从sstable文件中读取FilterBlock.
   Iterator* iter = meta->NewIterator(BytewiseComparator());
   std::string key = "filter.";
   key.append(rep_->options.filter_policy->Name());
@@ -110,6 +121,7 @@ void Table::ReadMeta(const Footer& footer) {
   delete meta;
 }
 
+// 读入FilterBlock. filter_handle_value保存了FilterBlock的大小及文件偏移.
 void Table::ReadFilter(const Slice& filter_handle_value) {
   Slice v = filter_handle_value;
   BlockHandle filter_handle;
@@ -152,6 +164,27 @@ static void ReleaseBlock(void* arg, void* h) {
 
 // Convert an index iterator value (i.e., an encoded BlockHandle)
 // into an iterator over the contents of the corresponding block.
+//
+// BlockReader根据索引信息index_value读取一个DataBlock, 返回其Iterator. 流程如下:
+//                    NO
+//           +------------ block_cache是否存在?
+//           |                   | YES
+//           |                   |              NO
+//           |           block_cache是否缓存了 ---------------+
+//           |              该DataBlock?                     |
+//           |                   | YES                       |
+//           |                   |           miss            |
+//  从磁盘读出DataBlock    cache hit/miss? ----------> 从磁盘读出DataBlock
+//           |                   | hit                       |
+//           |                   |                           |
+//           |           从cache读出DataBlock     将DataBlock封装为Block对象, 添加到block_cache
+//           |                   |                           |
+//           |                   |                           |
+//           +--------> 将DataBlock封装为Block对象            |
+//                               |                           |
+//                               |                           |
+//                      创建Block对象的Iterator <-------------+
+//
 Iterator* Table::BlockReader(void* arg, const ReadOptions& options,
                              const Slice& index_value) {
   Table* table = reinterpret_cast<Table*>(arg);
@@ -159,6 +192,7 @@ Iterator* Table::BlockReader(void* arg, const ReadOptions& options,
   Block* block = nullptr;
   Cache::Handle* cache_handle = nullptr;
 
+  // index_value是Index Block中的value, 保存DataBlock的索引信息(大小及文件偏移)
   BlockHandle handle;
   Slice input = index_value;
   Status s = handle.DecodeFrom(&input);
@@ -169,13 +203,19 @@ Iterator* Table::BlockReader(void* arg, const ReadOptions& options,
     BlockContents contents;
     if (block_cache != nullptr) {
       char cache_key_buffer[16];
+      // 对于sstable中的DataBlock, 在block_cache中存储的key = [cache_id][该DataBlock的文件偏移]
+      // value = DataBlock的具体数据(被封装成Block对象)
       EncodeFixed64(cache_key_buffer, table->rep_->cache_id);
       EncodeFixed64(cache_key_buffer + 8, handle.offset());
       Slice key(cache_key_buffer, sizeof(cache_key_buffer));
       cache_handle = block_cache->Lookup(key);
       if (cache_handle != nullptr) {
+        // cache hit
+        // 从cache中取出DataBlock的数据
         block = reinterpret_cast<Block*>(block_cache->Value(cache_handle));
       } else {
+        // cache miss
+        // 从磁盘中读取DataBlock, 将数据封装成Block对象添加到block_cache
         s = ReadBlock(table->rep_->file, options, handle, &contents);
         if (s.ok()) {
           block = new Block(contents);
@@ -186,6 +226,7 @@ Iterator* Table::BlockReader(void* arg, const ReadOptions& options,
         }
       }
     } else {
+      // 如果block_cache不存在, 就直接读磁盘
       s = ReadBlock(table->rep_->file, options, handle, &contents);
       if (s.ok()) {
         block = new Block(contents);
@@ -213,6 +254,9 @@ Iterator* Table::NewIterator(const ReadOptions& options) const {
       &Table::BlockReader, const_cast<Table*>(this), options);
 }
 
+// 在Index Block中找到对应于key(k)的DataBlock的索引, 如果通过FilterBlock判断key不存在,
+// 则直接返回Not found; 否则还需通过该索引从sstable文件读入DataBlock, 通过Seek操作确认
+// key(k)是否存在.
 Status Table::InternalGet(const ReadOptions& options, const Slice& k, void* arg,
                           void (*handle_result)(void*, const Slice&,
                                                 const Slice&)) {
@@ -220,7 +264,7 @@ Status Table::InternalGet(const ReadOptions& options, const Slice& k, void* arg,
   Iterator* iiter = rep_->index_block->NewIterator(rep_->options.comparator);
   iiter->Seek(k);
   if (iiter->Valid()) {
-    Slice handle_value = iiter->value();
+    Slice handle_value = iiter->value(); // Index Block中KV数据的value = DataBlock的大小及其文件偏移
     FilterBlockReader* filter = rep_->filter;
     BlockHandle handle;
     if (filter != nullptr && handle.DecodeFrom(&handle_value).ok() &&

@@ -1210,7 +1210,7 @@ Status DBImpl::Write(const WriteOptions& options, WriteBatch* updates) {
   MutexLock l(&mutex_);
   writers_.push_back(&w);
   while (!w.done && &w != writers_.front()) {
-    w.cv.Wait(); // 如果w之前还有写者在排队就等待他们完成写入
+    w.cv.Wait(); // 如果w之前还有写线程在排队就等待他们完成写入
   }
   if (w.done) {
     return w.status;
@@ -1221,7 +1221,7 @@ Status DBImpl::Write(const WriteOptions& options, WriteBatch* updates) {
   uint64_t last_sequence = versions_->LastSequence();
   Writer* last_writer = &w;
   if (status.ok() && updates != nullptr) {  // nullptr batch is for compactions
-    WriteBatch* updates = BuildBatchGroup(&last_writer);
+    WriteBatch* updates = BuildBatchGroup(&last_writer); // 批量组装队列中的部分写线程的batch, 以便批量写入
     WriteBatchInternal::SetSequence(updates, last_sequence + 1);
     last_sequence += WriteBatchInternal::Count(updates);
 
@@ -1255,7 +1255,11 @@ Status DBImpl::Write(const WriteOptions& options, WriteBatch* updates) {
     versions_->SetLastSequence(last_sequence); // 更新sequence number
   }
 
-  // 如果代码走到这里, 说明写者队列writers_中的所有写者已经完成写入, 将所有写者出队.
+  // 队列中的所有写线程的写操作已完成, 将其全部唤醒. 需要注意的是, while循环的退出条件并不是
+  // 队列为空, 而是遍历到last_writer. 由DBImpl::BuildBatchGroup()可知, last_writer并非
+  // 队列中的最后一个写线程, 而是最后一个参与写请求批量组装的写线程. 因为这些写线程的batch已
+  // 被批量组装为"updates", 所以说他们的写请求已处理完成, 故将done标记为true, 被唤醒后, 回到
+  // DBImpl::Write()最开始的那段代码, 就会因为w.done为true而直接return.
   while (true) {
     Writer* ready = writers_.front();
     writers_.pop_front();
@@ -1268,6 +1272,8 @@ Status DBImpl::Write(const WriteOptions& options, WriteBatch* updates) {
   }
 
   // Notify new head of write queue
+  // 写线程w加入队列时可能因为不再队首而进入等待状态, 但是现在w之前的写线程都因为
+  // 其提交的写请求已处理完成而被唤醒并出队, 那么w此时位于队首, 应将其唤醒.
   if (!writers_.empty()) {
     writers_.front()->cv.Signal();
   }
@@ -1289,6 +1295,11 @@ WriteBatch* DBImpl::BuildBatchGroup(Writer** last_writer) {
   // Allow the group to grow up to a maximum size, but if the
   // original write is small, limit the growth so we do not slow
   // down the small write too much.
+  // 设置批量写入的最大数据量. 从DBImpl::Write()可知, 如果有新的写线程提交了写请求,
+  // 那么他们必须要加入队列进行等待, 与此同时, BuildBatchGroup()将一些写线程提交的
+  // 写请求批量组装成WriteBatch并返回给调用者DBImpl::Write()完成写操作, 最后唤醒
+  // 队列中的这些写线程, 所以, 如果返回给调用者的WriteBatch越大, 那么完成写操作的时
+  // 间就越长, 队列中的写线程等待唤醒的时间就越长. 综上, 必须控制WriteBatch的大小.
   size_t max_size = 1 << 20;
   if (size <= (128 << 10)) {
     max_size = size + (128 << 10);
@@ -1301,6 +1312,7 @@ WriteBatch* DBImpl::BuildBatchGroup(Writer** last_writer) {
     Writer* w = *iter;
     if (w->sync && !first->sync) {
       // Do not include a sync write into a batch handled by a non-sync write.
+      // 只有sync设置相同的写线程提交的写请求会被批量组装.
       break;
     }
 
@@ -1312,15 +1324,18 @@ WriteBatch* DBImpl::BuildBatchGroup(Writer** last_writer) {
       }
 
       // Append to *result
-      if (result == first->batch) {
+      if (result == first->batch) { // 第一轮迭代
         // Switch to temporary batch instead of disturbing caller's batch
+        // 将写线程们的batch结构append到tmp_batch_中, 而不去修改第一个写线程first的batch,
+        // 因为result被初始化为指向first->batch, 所以需将其重新指向tmp_batch_
+
         result = tmp_batch_;
         assert(WriteBatchInternal::Count(result) == 0);
         WriteBatchInternal::Append(result, first->batch);
       }
       WriteBatchInternal::Append(result, w->batch);
     }
-    *last_writer = w;
+    *last_writer = w; // 将最后一个写线程保存到*last_writer返回给调用者
   }
   return result;
 }

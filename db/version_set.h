@@ -154,6 +154,7 @@ class Version {
   std::vector<FileMetaData*> files_[config::kNumLevels];
 
   // Next file to compact based on seek stats.
+  // 触发seek compaction的sstable文件的FileMetaData及其所属的level
   FileMetaData* file_to_compact_;
   int file_to_compact_level_;
 
@@ -161,7 +162,7 @@ class Version {
   // Score < 1 means compaction is not strictly needed.  These fields
   // are initialized by Finalize().
   // compaction_score_: L0的sstable文件总数或非L0的文件总字节数与阈值之比,
-  // 如果大于等于1就说明超过阈值. compaction_score_保存该比值的最大值,
+  // 如果大于等于1就说明超过阈值. compaction_score_保存该比值的最大值.
   // compaction_level_保存compaction_score_对应的level. 参见Finalize().
   double compaction_score_;
   int compaction_level_;

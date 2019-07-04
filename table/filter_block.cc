@@ -114,6 +114,8 @@ FilterBlockReader::FilterBlockReader(const FilterPolicy* policy,
   num_ = (n - 5 - last_word) / 4; // num of entries in offset_[]
 }
 
+// 每一个DataBlock都对应一个filter结构, block_offset = DataBlock的文件偏移, 通过它可以
+// 计算出filter结构在FilterBlock中的索引index
 bool FilterBlockReader::KeyMayMatch(uint64_t block_offset, const Slice& key) {
   uint64_t index = block_offset >> base_lg_;
   if (index < num_) {

@@ -38,7 +38,9 @@ TableCache::TableCache(const std::string& dbname, const Options& options,
 
 TableCache::~TableCache() { delete cache_; }
 
-Status TableCache::FindTable(uint64_t file_number, uint64_t file_size,
+// 查找指定的sstable被缓存在哪一个cache中? 如果cache miss, 就从磁盘读入该sstable,
+// 将其缓存到cache, 然后返回该cache的句柄——存储KV数据的LRUHandle对象.
+Status TableCache::FindTable(uint64_t file_number, uint64_t file_size, // file_number唯一标识一个sstable文件
                              Cache::Handle** handle) {
   Status s;
   char buf[sizeof(file_number)];
@@ -46,17 +48,18 @@ Status TableCache::FindTable(uint64_t file_number, uint64_t file_size,
   Slice key(buf, sizeof(buf));
   *handle = cache_->Lookup(key);
   if (*handle == nullptr) {
-    std::string fname = TableFileName(dbname_, file_number);
+    std::string fname = TableFileName(dbname_, file_number); // 使用扩展名.ldb
     RandomAccessFile* file = nullptr;
     Table* table = nullptr;
-    s = env_->NewRandomAccessFile(fname, &file);
+    s = env_->NewRandomAccessFile(fname, &file); // 创建只读sstable文件对象, 下同
     if (!s.ok()) {
-      std::string old_fname = SSTTableFileName(dbname_, file_number);
+      std::string old_fname = SSTTableFileName(dbname_, file_number); // 使用扩展名.sst
       if (env_->NewRandomAccessFile(old_fname, &file).ok()) {
         s = Status::OK();
       }
     }
     if (s.ok()) {
+      // 创建一个Table对象, 其中的数据来自file指向的sstable文件
       s = Table::Open(options_, file, file_size, &table);
     }
 
@@ -66,6 +69,12 @@ Status TableCache::FindTable(uint64_t file_number, uint64_t file_size,
       // We do not cache error results so that if the error is transient,
       // or somebody repairs the file, we recover automatically.
     } else {
+      // 将sstable文件对象file及由此生成的table对象一并添加到cache. table对象缓存了
+      // sstable中的索引模块(Meta Index Block和Index Block)以及FilterBlock. 如果
+      // 查找某个key, 可以先由FilterBlock判断其是否存在于DataBlock中, 如果判断不存在
+      // 就一定不存在; 如果判断存在, 则还需根据Index Block索引出key所在的DataBlock
+      // (Index Block已经被缓存在内存中, 所以无需从磁盘上读取之), 然后使用file对象从
+      // sstable读入DataBlock.
       TableAndFile* tf = new TableAndFile;
       tf->file = file;
       tf->table = table;
