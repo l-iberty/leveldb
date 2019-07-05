@@ -168,12 +168,10 @@ static void ReleaseBlock(void* arg, void* h) {
 // BlockReader根据索引信息index_value读取一个DataBlock, 返回其Iterator. 流程如下:
 //                    NO
 //           +------------ block_cache是否存在?
+//           |                   |
 //           |                   | YES
-//           |                   |              NO
-//           |           block_cache是否缓存了 ---------------+
-//           |              该DataBlock?                     |
-//           |                   | YES                       |
-//           |                   |           miss            |
+//           |                   |
+//           |                   |           miss
 //  从磁盘读出DataBlock    cache hit/miss? ----------> 从磁盘读出DataBlock
 //           |                   | hit                       |
 //           |                   |                           |
