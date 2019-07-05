@@ -36,7 +36,7 @@ struct Table::Rep {
 };
 
 // 创建一个Table对象, 将其保存到*table. Table对象是对sstable的缓存, 但是其中的若干个
-// DataBlock并未读入到内存中, 读入的模块包括: Footer, Index Block, Meta Index Block.
+// DataBlock并未读入到内存中, 读入的模块包括: Footer, Index Block, Meta Index Block, FilterBlock
 Status Table::Open(const Options& options, RandomAccessFile* file, // file是一个只读sstable文件
                    uint64_t size, Table** table) {
   *table = nullptr;
