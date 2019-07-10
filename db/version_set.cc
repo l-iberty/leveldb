@@ -1467,17 +1467,22 @@ void AddBoundaryInputs(const InternalKeyComparator& icmp,
   }
 }
 
+// SetupOtherInputs()的核心任务: 选择level+1层的sstable文件参与compaction, 这些文件
+// 和level层中参与compaction的文件存在key的重叠.
 void VersionSet::SetupOtherInputs(Compaction* c) {
   const int level = c->level();
   InternalKey smallest, largest;
 
   AddBoundaryInputs(icmp_, current_->files_[level], &c->inputs_[0]);
-  GetRange(c->inputs_[0], &smallest, &largest);
 
+  // 获取level层中参与compaction的sstable文件的key的范围[smallest, largest],
+  // 据此选择level+1层中与之重叠的文件与之一并参与compaction.
+  GetRange(c->inputs_[0], &smallest, &largest);
   current_->GetOverlappingInputs(level + 1, &smallest, &largest,
                                  &c->inputs_[1]);
 
   // Get entire range covered by compaction
+  // 获取level、level+1层中参与compaction的sstable文件的key的范围[all_start, all_limit]
   InternalKey all_start, all_limit;
   GetRange2(c->inputs_[0], c->inputs_[1], &all_start, &all_limit);
 
@@ -1516,6 +1521,7 @@ void VersionSet::SetupOtherInputs(Compaction* c) {
   // Compute the set of grandparent files that overlap this compaction
   // (parent == level+1; grandparent == level+2)
   if (level + 2 < config::kNumLevels) {
+    // 和level+2的哪些文件存在key的重叠?
     current_->GetOverlappingInputs(level + 2, &all_start, &all_limit,
                                    &c->grandparents_);
   }
@@ -1528,11 +1534,12 @@ void VersionSet::SetupOtherInputs(Compaction* c) {
   c->edit_.SetCompactPointer(level, largest);
 }
 
-// 得到level层中指定范围内[begin,end]需要compaction的sstable文件.
+// 选择level层中[begin, end]范围内需要compaction的sstable文件A; 最后由SetupOtherInputs()
+// 选择level+1层中与A存在key重叠的sstable文件B, 与A一并参与compaction.
 Compaction* VersionSet::CompactRange(int level, const InternalKey* begin,
                                      const InternalKey* end) {
   std::vector<FileMetaData*> inputs;
-  // 将当前层中与[begin, end]有重叠的sstable文件放入inputs.
+  // 将level层中key与[begin, end]有重叠的sstable文件放入inputs.
   current_->GetOverlappingInputs(level, begin, end, &inputs);
   if (inputs.empty()) {
     return nullptr;
@@ -1586,8 +1593,8 @@ bool Compaction::IsTrivialMove() const {
   // Avoid a move if there is lots of overlapping grandparent data.
   // Otherwise, the move could create a parent file that will require
   // a very expensive merge later on.
-  return (num_input_files(0) == 1 && num_input_files(1) == 0 &&
-          TotalFileSize(grandparents_) <=
+  return (num_input_files(0) == 1 && num_input_files(1) == 0 && // level层只有一个sstable文件参与compaction(记为A), 并且level+1层中没有与之重叠的文件
+          TotalFileSize(grandparents_) <= // level+2层中和A重叠的文件的总字节数不超过一个阈值
               MaxGrandParentOverlapBytes(vset->options_));
 }
 
