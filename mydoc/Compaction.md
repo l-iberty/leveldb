@@ -10,7 +10,11 @@ Status DBImpl::InstallCompactionResults(CompactionState* compact) {
 	...
 }
 ```
-之后`level`层和`level+1`层里参与compaction的文件会被删除. LSM-Tree的写放大就在于, major compaction时`level`层文件与`level+1`层文件合并时导致`level+1`层里参与compaction的文件被重写.
+之后`level`层和`level+1`层里参与compaction的文件会被删除.
+
+major compaction 是导致写放大的原因:
+
+把 Level(n) 的sstable 文件合并到 Level(n+1) 时, 由于 Level(n) 的 sstable 几乎会与 Level(n+1) 的所有 sstable 存在 key 的重叠, 所以 Level(n) 的 key 会分散在 Level(n+1) 的所有 sstable 中, 导致 Level(n+1) 的 sstable 们被更新、重写. 如果 Level(n+1) 的 sstable数量是 Level(n) 的10倍, 这个写放大就是10.
 
 leveldb在使用`MergingIterator`实现SSTable文件的合并排序, 也就是对所有参与compaction的文件构建了一个"合并迭代器", 见`DBImpl::DoCompactionWork()`里的一段代码:
 ```cpp

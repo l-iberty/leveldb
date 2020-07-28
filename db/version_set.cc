@@ -1332,6 +1332,12 @@ Iterator* VersionSet::MakeInputIterator(Compaction* c) {
 // 下降, 先根据key的范围确定可能的sstable, 然后逐一进行Seek操作(Version::Get). 正是由于
 // key的这种重叠, 有时Level(n)的某个sstable的Seek操作未命中, 不得不去Level(n+1)查找, 这就
 // 会影响sstable的查找效率, 因此需要对sstable进行major compaction.
+//
+// major compaction 是导致写放大的原因:
+// 把 Level(n) 的sstable 文件合并到 Level(n+1) 时, 由于 Level(n) 的 sstable 几乎会与
+// Level(n+1) 的所有 sstable 存在 key 的重叠, 所以 Level(n) 的 key 会分散在 Level(n+1)
+// 的所有 sstable 中, 导致 Level(n+1) 的 sstable 们被更新、重写. 如果 Level(n+1) 的 sstable
+// 数量是 Level(n) 的10倍, 这个写放大就是10.
 Compaction* VersionSet::PickCompaction() {
   Compaction* c;
   int level;
