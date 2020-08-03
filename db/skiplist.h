@@ -36,6 +36,13 @@
 
 // SkipList的核心操作就两个: FindGreaterOrEqual, Insert
 
+// Why skiplist?
+// skiplist 实现了近似于 AVL 的性能, 那为什么不直接用 AVL 之类的平衡树?
+// 平衡树在操作过程中需要调整, 所以需要锁住整个树, 并发性差; skiplist 是
+// 单链结构, 所以我们在代码中没有看到加锁操作, 简单的原子操作即可实现线程
+// 安全. skiplist 的妙处在于通过单链结构实现树形结构的查找性能的同时, 通
+// 过原子操作实现无锁并发
+
 namespace leveldb {
 
 class Arena;
