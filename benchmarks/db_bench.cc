@@ -2,6 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
+// 测试是对以下内容进行了修改:
+// 1. fillbatch 的参数
+// 2. FLAGS_threads
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/types.h>
@@ -11,6 +15,7 @@
 #include "leveldb/env.h"
 #include "leveldb/filter_policy.h"
 #include "leveldb/write_batch.h"
+
 #include "port/port.h"
 #include "util/crc32c.h"
 #include "util/histogram.h"
@@ -68,7 +73,8 @@ static int FLAGS_reads = -1;
 static int FLAGS_threads = 1;
 
 // Size of each value
-static int FLAGS_value_size = 100;
+// static int FLAGS_value_size = 100;
+static int FLAGS_value_size = 4195 - 16;
 
 // Arrange to generate values that shrink to this fraction of
 // their original size after compression
@@ -459,8 +465,10 @@ class Benchmark {
         method = &Benchmark::WriteSeq;
       } else if (name == Slice("fillbatch")) {
         fresh_db = true;
-        entries_per_batch_ = 1000;
+        // entries_per_batch_ = 1000;
+        entries_per_batch_ = 200;
         method = &Benchmark::WriteSeq;
+        write_options_.sync = true;  // for testing
       } else if (name == Slice("fillrandom")) {
         fresh_db = true;
         method = &Benchmark::WriteRandom;
