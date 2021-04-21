@@ -1210,12 +1210,13 @@ Status DBImpl::Write(const WriteOptions& options, WriteBatch* updates) {
   MutexLock l(&mutex_);
   writers_.push_back(&w);
   while (!w.done && &w != writers_.front()) {
-    w.cv.Wait(); // 如果w之前还有写线程在排队就等待他们完成写入
+    w.cv.Wait();
   }
   if (w.done) {
     return w.status;
   }
 
+  // 只有排在队首的线程会来到这里, 其他线程在前面等待通知
   // May temporarily unlock and wait.
   Status status = MakeRoomForWrite(updates == nullptr); // 根据DB状态制定写入策略
   uint64_t last_sequence = versions_->LastSequence();
@@ -1229,6 +1230,8 @@ Status DBImpl::Write(const WriteOptions& options, WriteBatch* updates) {
     // during this phase since &w is currently responsible for logging
     // and protects against concurrent loggers and concurrent writes
     // into mem_.
+    // 因为只有排在队首的线程在写数据, 其他线程都在等待, 不存在竞争, 所以可以unlock
+    // unlock之后就会有新的线程加入到 writers_ 队列
     {
       mutex_.Unlock();
       status = log_->AddRecord(WriteBatchInternal::Contents(updates)); // 先写log
@@ -1272,8 +1275,8 @@ Status DBImpl::Write(const WriteOptions& options, WriteBatch* updates) {
   }
 
   // Notify new head of write queue
-  // 写线程w加入队列时可能因为不再队首而进入等待状态, 但是现在w之前的写线程都因为
-  // 其提交的写请求已处理完成而被唤醒并出队, 那么w此时位于队首, 应将其唤醒.
+  // 写线程 w 加入队列时可能因为不在队首而进入等待状态, 但是现在 w 之前的写线程都因为
+  // 其提交的写请求已处理完成而被唤醒并出队, 那么 w 此时位于队首, 应将其唤醒.
   if (!writers_.empty()) {
     writers_.front()->cv.Signal();
   }
